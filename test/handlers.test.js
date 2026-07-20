@@ -498,7 +498,8 @@ describe("handlers via mock transport (Docker contract)", () => {
       dry_run: false,
     });
     assert.equal(applied.isError, undefined);
-    assert.equal(readFileSync(transport.resolvePath("patchme/hello.txt"), "utf8"), "hello patched\n");
+    const patched = readFileSync(transport.resolvePath("patchme/hello.txt"), "utf8").replace(/\r\n/g, "\n");
+    assert.equal(patched, "hello patched\n");
   });
 
   it("docker_apply_patch dry_run does not mutate the file", async () => {

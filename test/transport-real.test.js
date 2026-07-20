@@ -32,13 +32,14 @@ describe("spawnCaptured", () => {
   });
 
   it("honors cwd and env", async () => {
+    const cwd = process.cwd();
     const result = await spawnCaptured(
       process.execPath,
       ["-e", "process.stdout.write(process.cwd() + '|' + process.env.MCP_TEST_ENV)"],
-      { cwd: "/", env: { ...process.env, MCP_TEST_ENV: "yes" } },
+      { cwd, env: { ...process.env, MCP_TEST_ENV: "yes" } },
     );
     assert.equal(result.code, 0);
-    assert.equal(result.stdout.toString(), "/|yes");
+    assert.equal(result.stdout.toString(), `${cwd}|yes`);
   });
 
   it("rejects when stdout exceeds maxBytes", async () => {
