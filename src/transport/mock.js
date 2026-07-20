@@ -1,0 +1,187 @@
+import { spawn } from "node:child_process";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  chmodSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
+import { isAbsolute as isPosixAbsolute } from "node:path/posix";
+import { MAX_TEXT_BYTES, formatFailure, parseTarget } from "../util.js";
+import { spawnCaptured } from "./real.js";
+
+/**
+ * Resolve a remote path against the mock container root.
+ * Absolute paths are treated as rooted under remoteRoot (sandbox).
+ * @param {string} remoteRoot
+ * @param {string} remotePath
+ */
+export function resolveRemotePath(remoteRoot, remotePath) {
+  if (!remotePath) throw new Error("remote path is required");
+  if (remotePath.includes("\0")) throw new Error("paths must not contain NUL");
+  const localRoot = resolve(remoteRoot);
+  const isAbs = isPosixAbsolute(remotePath);
+  const cleaned = isAbs ? remotePath.replace(/^\/+/, "") : remotePath;
+  const abs = join(localRoot, cleaned);
+  const prefix = localRoot.toLowerCase() + sep.toLowerCase();
+  if (abs.toLowerCase() !== localRoot.toLowerCase() && !abs.toLowerCase().startsWith(prefix)) {
+    throw new Error(`path escapes mock container root: ${remotePath}`);
+  }
+  return abs;
+}
+
+/**
+ * In-process Docker transport that executes the same remote command strings locally
+ * under a sandboxed directory. At the contract boundary it matches real Docker
+ * (`exec` / `cp` / `close` / `spawnInteractive`).
+ *
+ * @param {{ remoteRoot?: string, identity?: { uid?: string, hostname?: string } }} [options]
+ * @returns {import('./contract.js').DockerTransport & { remoteRoot: string, resolvePath: (p: string) => string, dispose: () => void }}
+ */
+export function createMockTransport({
+  remoteRoot,
+  identity = { uid: "1000", hostname: "mock-container" },
+} = {}) {
+  const ownedRoot = !remoteRoot;
+  const root = remoteRoot || mkdtempSync(join(tmpdir(), "mcp-docker-mock-"));
+  mkdirSync(root, { recursive: true });
+
+  const binDir = join(root, ".mock-bin");
+  mkdirSync(binDir, { recursive: true });
+  const uid = identity.uid ?? "1000";
+  const host = identity.hostname ?? "mock-container";
+  writeFileSync(join(binDir, "id"), `#!/bin/sh\nif [ "$1" = "-u" ]; then printf '%s\\n' '${uid}'; else command -p id "$@"; fi\n`);
+  writeFileSync(join(binDir, "hostname"), `#!/bin/sh\nprintf '%s\\n' '${host}'\n`);
+  chmodSync(join(binDir, "id"), 0o755);
+  chmodSync(join(binDir, "hostname"), 0o755);
+
+  const bashEnvPath = join(binDir, ".bash_env");
+  writeFileSync(
+    bashEnvPath,
+    `id() { printf '%s\\n' '${uid}'; }\n` +
+    `hostname() { printf '%s\\n' '${host}'; }\n` +
+    `export -f id hostname\n`,
+  );
+
+  const pathSep = process.platform === "win32" ? ";" : ":";
+  const env = {
+    ...process.env,
+    HOME: root,
+    USER: "mock",
+    LOGNAME: "mock",
+    PATH: `${binDir}${pathSep}${process.env.PATH || "/usr/bin:/bin"}`,
+    BASH_ENV: bashEnvPath.replace(/\\/g, "/"),
+  };
+
+  async function runRemote(remoteCommand, { stdin, maxBytes = MAX_TEXT_BYTES, timeoutMs = 30000 } = {}) {
+    return spawnCaptured("bash", ["--noprofile", "--norc", "-c", remoteCommand], {
+      stdin,
+      maxBytes,
+      timeoutMs,
+      cwd: root,
+      env,
+    });
+  }
+
+  async function exec(target, remoteCommand, {
+    stdin,
+    maxBytes = MAX_TEXT_BYTES,
+    timeoutMs = 30000,
+    allowNonZero = false,
+    okCodes = [],
+  } = {}) {
+    parseTarget(target);
+    const result = await runRemote(remoteCommand, { stdin, maxBytes, timeoutMs });
+    const successCodes = new Set([0, ...okCodes]);
+    if (!allowNonZero && !successCodes.has(result.code)) {
+      throw new Error(formatFailure(result));
+    }
+    return result;
+  }
+
+  async function cp(target, { direction, localPath, remotePath, recursive = false }) {
+    parseTarget(target);
+    if (!localPath || !remotePath) throw new Error("local_path and remote_path are required");
+    if (localPath.includes("\0") || remotePath.includes("\0")) throw new Error("paths must not contain NUL");
+
+    const remoteAbs = resolveRemotePath(root, remotePath);
+
+    if (direction === "to") {
+      if (!existsSync(localPath)) throw new Error(`local path does not exist: ${localPath}`);
+      const st = statSync(localPath);
+      if (st.isDirectory() && !recursive) throw new Error("local path is a directory; set recursive=true");
+      if (!st.isDirectory() && !st.isFile()) throw new Error(`local path is not a regular file/directory: ${localPath}`);
+      mkdirSync(dirname(remoteAbs), { recursive: true });
+      if (st.isDirectory()) cpSync(localPath, remoteAbs, { recursive: true });
+      else copyFileSync(localPath, remoteAbs);
+    } else if (direction === "from") {
+      if (!existsSync(remoteAbs)) {
+        throw new Error(formatFailure({
+          code: 1,
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.from(`cp: ${remotePath}: No such file or directory\n`),
+        }));
+      }
+      mkdirSync(dirname(localPath), { recursive: true });
+      const st = statSync(remoteAbs);
+      if (st.isDirectory()) {
+        if (!recursive) throw new Error("remote path is a directory; set recursive=true");
+        cpSync(remoteAbs, localPath, { recursive: true });
+      } else {
+        copyFileSync(remoteAbs, localPath);
+      }
+    } else {
+      throw new Error('direction must be "to" (upload) or "from" (download)');
+    }
+
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0, signal: null };
+  }
+
+  async function close() {
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0, signal: null };
+  }
+
+  function spawnInteractive(target, remoteCommand) {
+    parseTarget(target);
+    return spawn("bash", ["--noprofile", "--norc", "-c", remoteCommand], {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd: root,
+      env,
+      detached: true,
+    });
+  }
+
+  function spawnBackground(target, remoteCommand) {
+    parseTarget(target);
+    return spawn("bash", ["--noprofile", "--norc", "-c", remoteCommand], {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: root,
+      env,
+      detached: true,
+    });
+  }
+
+  function dispose() {
+    if (ownedRoot) {
+      try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+
+  return {
+    remoteRoot: root,
+    exec,
+    cp,
+    close,
+    spawnInteractive,
+    spawnBackground,
+    getMuxEnabled: () => false,
+    dispose,
+    resolvePath: (p) => resolveRemotePath(root, p),
+  };
+}

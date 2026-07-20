@@ -1,0 +1,43 @@
+{
+  "name": "@jahrulnr/mcp-docker-agentic",
+  "version": "0.1.0",
+  "description": "MCP server for agentic Docker container operations via docker exec and docker cp",
+  "type": "module",
+  "bin": {
+    "mcp-docker-agentic": "src/cli.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node src/cli.js",
+    "check": "node --check src/cli.js src/index.js src/app.js src/util.js src/jobs.js src/transport/real.js src/transport/mock.js",
+    "test": "node --test test/handlers.test.js test/jobs.test.js test/util.test.js",
+    "test:unit": "npm test",
+    "test:mcp": "npm run test:mcp:node && npm run test:mcp:npx",
+    "test:mcp:node": "node test/mcp-smoke.mjs node",
+    "test:mcp:npx": "node test/mcp-smoke.mjs npx",
+    "test:all": "npm run check && npm run test:unit && npm run test:mcp"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jahrulnr/mcp-docker-agentic.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jahrulnr/mcp-docker-agentic/issues"
+  },
+  "homepage": "https://github.com/jahrulnr/mcp-docker-agentic#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "license": "MIT"
+}
