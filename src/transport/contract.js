@@ -30,10 +30,10 @@
  * @property {(target: string, opts: CpOptions) => Promise<CapturedResult>} cp
  * @property {(target: string) => Promise<CapturedResult>} close
  *   No-op for Docker (no persistent connection).
- * @property {(target: string, remoteCommand: string) => import('node:child_process').ChildProcess} spawnInteractive
- *   Spawn an interactive session with PTY-like stdio pipes (stdin/stdout/stderr).
- * @property {(target: string, remoteCommand: string) => import('node:child_process').ChildProcess} spawnBackground
- *   Spawn a detached background session with stdout/stderr pipes (stdin is ignored).
+ * @property {(target: string, remoteCommand: string) => import('node:child_process').ChildProcess | Promise<import('node:child_process').ChildProcess>} spawnInteractive
+ *   Spawn an interactive session with stdin/stdout/stderr pipes (no fake TTY).
+ * @property {(target: string, remoteCommand: string) => import('node:child_process').ChildProcess | Promise<import('node:child_process').ChildProcess>} spawnBackground
+ *   Spawn a background session with stdout/stderr pipes (stdin ignored). Must not detach from the docker client (`-d`).
  * @property {() => boolean} [getMuxEnabled]
  *   Always false for Docker (no multiplexing).
  * @property {() => void} [dispose]

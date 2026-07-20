@@ -1,6 +1,6 @@
 {
   "name": "@jahrulnr/mcp-docker-agentic",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server for agentic Docker container operations via docker exec and docker cp",
   "type": "module",
   "bin": {

@@ -528,6 +528,50 @@ describe("handlers via mock transport (Docker contract)", () => {
     assert.equal(readFileSync(transport.resolvePath("patchme/dry.txt"), "utf8"), "before\n");
   });
 
+  it("docker_apply_patch accepts absolute paths by normalizing to root-relative", async () => {
+    await api.handlers.docker_write_file({
+      container: TARGET,
+      path: "tmp/abs-patch.txt",
+      content: "one\n",
+      append: false,
+      create_dirs: true,
+    });
+    const patch = [
+      "--- /tmp/abs-patch.txt",
+      "+++ /tmp/abs-patch.txt",
+      "@@ -1 +1 @@",
+      "-one",
+      "+two",
+      "",
+    ].join("\n");
+    const applied = await api.handlers.docker_apply_patch({
+      container: TARGET,
+      patch,
+      strip: 0,
+      dry_run: false,
+    });
+    assert.equal(applied.isError, undefined, textOf(applied));
+    const text = readFileSync(transport.resolvePath("tmp/abs-patch.txt"), "utf8").replace(/\r\n/g, "\n");
+    assert.equal(text, "two\n");
+  });
+
+  it("docker_exec background captures stdout through the job manager", async () => {
+    const started = await api.handlers.docker_exec({
+      container: TARGET,
+      command: "printf 'bg-stdout\\n'",
+      background: true,
+    });
+    const jobId = textOf(started).match(/job_id=([^\n]+)/)[1];
+    const result = await api.handlers.docker_exec_result({
+      job_id: jobId,
+      wait: true,
+      timeout_ms: 5000,
+    });
+    assert.equal(result.isError, undefined);
+    assert.match(textOf(result), /bg-stdout/);
+    assert.match(textOf(result), /exit_code=0/);
+  });
+
   it("docker_delete recursive removes a directory tree", async () => {
     await api.handlers.docker_write_file({
       container: TARGET,

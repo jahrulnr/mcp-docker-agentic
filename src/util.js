@@ -158,21 +158,27 @@ export function remoteGrepCommand({
  * @param {object} opts
  * @param {number} [opts.strip]
  * @param {boolean} [opts.dry_run]
+ * @param {boolean} [opts.cdRoot] when true, run from `/` (needed after absolute paths are normalized)
  */
-export function remoteApplyPatchCommand({ strip = 0, dry_run = false } = {}) {
+export function remoteApplyPatchCommand({ strip = 0, dry_run = false, cdRoot = false } = {}) {
   const p = Number(strip) || 0;
   const header = [
+    ...(cdRoot ? [
+      'CDROOT=/',
+      '[ -n "$MCP_DOCKER_ROOT" ] && [ -d "$MCP_DOCKER_ROOT" ] && CDROOT="$MCP_DOCKER_ROOT"',
+      'cd -- "$CDROOT"',
+    ] : []),
     "tmpfile=$(mktemp)",
-    "cat > \"$tmpfile\"",
+    'cat > "$tmpfile"',
   ];
   if (dry_run) {
     return [
       ...header,
       "if command -v git >/dev/null 2>&1; then",
-      `  git apply --check -p${p} \"$tmpfile\" 2>/dev/null && { rm -f \\"tmpfile\\"; exit 0; }`,
+      `  git apply --check -p${p} "$tmpfile" 2>/dev/null && { rm -f "$tmpfile"; exit 0; }`,
       "fi",
       "if command -v patch >/dev/null 2>&1; then",
-      `  patch --dry-run -p${p} < \"$tmpfile\" 2>/dev/null && { rm -f \\"tmpfile\\"; exit 0; }`,
+      `  patch --dry-run -p${p} < "$tmpfile" 2>/dev/null && { rm -f "$tmpfile"; exit 0; }`,
       "fi",
       'rm -f "$tmpfile"',
       'echo "dry-run not supported: neither git apply --check nor patch --dry-run is available" >&2; exit 2',
@@ -188,15 +194,63 @@ export function remoteApplyPatchCommand({ strip = 0, dry_run = false } = {}) {
   }
   lines.push(
     "if command -v git >/dev/null 2>&1; then",
-    `  git apply -p${p} "$tmpfile" 2>/dev/null && { rm -f \\"tmpfile\\"; exit 0; }`,
+    `  git apply -p${p} "$tmpfile" 2>/dev/null && { rm -f "$tmpfile"; exit 0; }`,
     "fi",
     "if command -v patch >/dev/null 2>&1; then",
-    `  patch -p${p} < "$tmpfile" && { rm -f \\"tmpfile\\"; exit 0; }`,
+    `  patch -p${p} < "$tmpfile" && { rm -f "$tmpfile"; exit 0; }`,
     "fi",
     'rm -f "$tmpfile"',
-    '  echo "no patch tool found" >&2; exit 2',
+    'echo "no patch tool found" >&2; exit 2',
   );
   return lines.join("\n");
+}
+
+/**
+ * Normalize absolute paths in unified-diff headers so patch/git apply can find
+ * files when run from `/`. Relative headers are left unchanged.
+ * @param {string} patch
+ * @returns {{ patch: string, cdRoot: boolean }}
+ */
+export function preparePatchForRemote(patch) {
+  const text = String(patch ?? "");
+  const hasAbsolute = /^(---|\+\+\+)\s+\//m.test(text);
+  if (!hasAbsolute) return { patch: text, cdRoot: false };
+  const normalized = text.replace(/^(---|\+\+\+)\s+\/([^\s]+)/gm, "$1 $2");
+  return { patch: normalized, cdRoot: true };
+}
+
+/**
+ * Identity probe that works on slim images without a `hostname` binary.
+ * Prints uid on the first line and a host label on the second.
+ */
+export function remotePingCommand() {
+  return [
+    "uid=$(id -u)",
+    'host=$(hostname 2>/dev/null || true)',
+    'if [ -z "$host" ] && [ -r /etc/hostname ]; then host=$(cat /etc/hostname 2>/dev/null || true); fi',
+    'if [ -z "$host" ]; then host=$(uname -n 2>/dev/null || true); fi',
+    'if [ -z "$host" ]; then host=unknown; fi',
+    'host=$(printf "%s" "$host" | tr -d "\\r" | head -n 1)',
+    'printf "%s\\n%s\\n" "$uid" "$host"',
+  ].join("\n");
+}
+
+/**
+ * Verify bytes written by docker_write_file.
+ * @param {string} path
+ * @param {string} content
+ * @param {boolean} append
+ */
+export function remoteWriteVerifyCommand(path, content, append = false) {
+  const expected = Buffer.byteLength(content, "utf8");
+  const p = shellQuote(path);
+  if (append) {
+    return [
+      `got=$(tail -c ${expected} -- ${p} 2>/dev/null || true)`,
+      `printf '%s' "$got" | wc -c | tr -d ' \\t\\n'`,
+    ].join("; ");
+  }
+  return `wc -c < ${p} | tr -d ' \\t\\n'`;
 }
 
 export function formatBytes(n) {

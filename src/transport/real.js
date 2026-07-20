@@ -77,6 +77,26 @@ export function dockerExecArgs(container, shell, remoteCommand, execOpts = {}) {
 }
 
 /**
+ * Build docker exec argv for an interactive (stdin-attached, no TTY) session.
+ * @param {string} container
+ * @param {string} shell
+ * @param {string} remoteCommand
+ */
+export function dockerInteractiveArgs(container, shell, remoteCommand) {
+  return ["exec", "-i", container, shell, "-c", remoteCommand];
+}
+
+/**
+ * Build docker exec argv for a background job that keeps stdout/stderr attached.
+ * @param {string} container
+ * @param {string} shell
+ * @param {string} remoteCommand
+ */
+export function dockerBackgroundArgs(container, shell, remoteCommand) {
+  return ["exec", container, shell, "-c", remoteCommand];
+}
+
+/**
  * Real transport: local `docker` binary (exec / cp).
  * @param {{ dockerBinary?: string }} [options]
  * @returns {import('./contract.js').DockerTransport & { getMuxEnabled: () => boolean }}
@@ -101,10 +121,6 @@ export function createRealTransport({ dockerBinary = "docker" } = {}) {
       shellCache.set(container, await detectShell(container));
     }
     return shellCache.get(container);
-  }
-
-  function getShellSync(container) {
-    return shellCache.get(container) || "/bin/sh";
   }
 
   async function exec(container, remoteCommand, {
@@ -161,20 +177,39 @@ export function createRealTransport({ dockerBinary = "docker" } = {}) {
     return result;
   }
 
-  async function close() {
+  function close() {
     return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0, signal: null };
   }
 
-  function spawnInteractive(container, remoteCommand) {
+  /**
+   * Interactive sessions need stdin attached (`-i`) but must not allocate a TTY (`-t`)
+   * when the local side is a Node pipe — Docker rejects `-t` without a real terminal.
+   * @param {string} container
+   * @param {string} remoteCommand
+   * @returns {Promise<import('node:child_process').ChildProcess>}
+   */
+  async function spawnInteractive(container, remoteCommand) {
     parseTarget(container);
-    const shell = getShellSync(container);
-    return spawn(dockerBinary, ["exec", "-it", container, shell, "-c", remoteCommand], { stdio: ["pipe", "pipe", "pipe"] });
+    const shell = await resolveShell(container);
+    return spawn(dockerBinary, dockerInteractiveArgs(container, shell, remoteCommand), {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
   }
 
-  function spawnBackground(container, remoteCommand) {
+  /**
+   * Background jobs must keep stdout/stderr attached to the local docker client so
+   * the job manager can capture output. Do not use `docker exec -d`.
+   * @param {string} container
+   * @param {string} remoteCommand
+   * @returns {Promise<import('node:child_process').ChildProcess>}
+   */
+  async function spawnBackground(container, remoteCommand) {
     parseTarget(container);
-    const shell = getShellSync(container);
-    return spawn(dockerBinary, ["exec", "-d", container, shell, "-c", remoteCommand], { stdio: "ignore", detached: true });
+    const shell = await resolveShell(container);
+    return spawn(dockerBinary, dockerBackgroundArgs(container, shell, remoteCommand), {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
   }
 
   return {

@@ -13,8 +13,11 @@ import {
   remoteApplyPatchCommand,
   remoteGrepCommand,
   remoteListDirCommand,
+  remotePingCommand,
   remoteReadFileCommand,
   remoteShellCommand,
+  remoteWriteVerifyCommand,
+  preparePatchForRemote,
   safe,
   settleSession,
   shellQuote,
@@ -129,6 +132,8 @@ describe("remoteApplyPatchCommand", () => {
     const cmd = remoteApplyPatchCommand();
     assert.match(cmd, /apply_patch/);
     assert.match(cmd, /patch -p0/);
+    assert.match(cmd, /rm -f "\$tmpfile"/);
+    assert.doesNotMatch(cmd, /rm -f \\+"tmpfile\\+"/);
   });
 
   it("supports strip level", () => {
@@ -140,6 +145,51 @@ describe("remoteApplyPatchCommand", () => {
   it("supports dry-run", () => {
     const cmd = remoteApplyPatchCommand({ dry_run: true });
     assert.match(cmd, /git apply --check/);
+    assert.match(cmd, /rm -f "\$tmpfile"/);
+  });
+
+  it("cds to / when cdRoot is set", () => {
+    const cmd = remoteApplyPatchCommand({ cdRoot: true });
+    assert.match(cmd, /CDROOT=\//);
+    assert.match(cmd, /MCP_DOCKER_ROOT/);
+    assert.match(cmd, /cd -- "\$CDROOT"/);
+  });
+});
+
+describe("preparePatchForRemote", () => {
+  it("leaves relative patches unchanged", () => {
+    const patch = "--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-a\n+b\n";
+    const prepared = preparePatchForRemote(patch);
+    assert.equal(prepared.cdRoot, false);
+    assert.equal(prepared.patch, patch);
+  });
+
+  it("strips leading slashes from absolute headers and sets cdRoot", () => {
+    const patch = "--- /tmp/a.txt\n+++ /tmp/a.txt\n@@ -1 +1 @@\n-a\n+b\n";
+    const prepared = preparePatchForRemote(patch);
+    assert.equal(prepared.cdRoot, true);
+    assert.match(prepared.patch, /^--- tmp\/a\.txt/m);
+    assert.match(prepared.patch, /^\+\+\+ tmp\/a\.txt/m);
+  });
+});
+
+describe("remotePingCommand", () => {
+  it("does not require hostname as a hard dependency", () => {
+    const cmd = remotePingCommand();
+    assert.match(cmd, /id -u/);
+    assert.match(cmd, /\/etc\/hostname/);
+    assert.match(cmd, /uname -n/);
+    assert.match(cmd, /hostname 2>\/dev\/null/);
+  });
+});
+
+describe("remoteWriteVerifyCommand", () => {
+  it("counts bytes for overwrite", () => {
+    assert.match(remoteWriteVerifyCommand("/tmp/x", "hi\n", false), /wc -c/);
+  });
+
+  it("checks tail length for append", () => {
+    assert.match(remoteWriteVerifyCommand("/tmp/x", "hi\n", true), /tail -c 3/);
   });
 });
 

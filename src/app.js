@@ -17,11 +17,14 @@ import {
   formatBytes,
   formatFailure,
   parseTarget,
+  preparePatchForRemote,
   remoteApplyPatchCommand,
   remoteGrepCommand,
   remoteListDirCommand,
+  remotePingCommand,
   remoteReadFileCommand,
   remoteShellCommand,
+  remoteWriteVerifyCommand,
   safe,
   settleSession,
   shellQuote,
@@ -70,7 +73,7 @@ export function createHandlers(transport, {
 
   const handlers = {
     docker_ping: async ({ container }) => safe(async () => {
-      const result = await transport.exec(container, remoteShellCommand("id -u && hostname"), { timeoutMs: 15000 });
+      const result = await transport.exec(container, remoteShellCommand(remotePingCommand()), { timeoutMs: 15000 });
       return textResult(decodeUtf8(result.stdout).trim());
     }),
 
@@ -81,11 +84,21 @@ export function createHandlers(transport, {
 
     docker_write_file: async ({ container, path, content, append = false, create_dirs = true }) => safe(async () => {
       if (Buffer.byteLength(content, "utf8") > MAX_TEXT_BYTES) throw new Error(`content exceeds ${MAX_TEXT_BYTES} bytes`);
+      const expected = Buffer.byteLength(content, "utf8");
       const mkdirCmd = create_dirs ? `mkdir -p -- ${shellQuote(posixDirname(path))} && ` : "";
       const redirect = append ? ">>" : ">";
       const command = `${mkdirCmd}cat ${redirect} ${shellQuote(path)}`;
       await transport.exec(container, remoteShellCommand(command), { stdin: content, maxBytes: MAX_TEXT_BYTES });
-      return textResult(`${append ? "Appended to" : "Wrote"} ${container}:${path} (${Buffer.byteLength(content, "utf8")} bytes)`);
+      const verify = await transport.exec(
+        container,
+        remoteShellCommand(remoteWriteVerifyCommand(path, content, append)),
+        { maxBytes: 64 },
+      );
+      const actual = Number.parseInt(decodeUtf8(verify.stdout).trim(), 10);
+      if (!Number.isFinite(actual) || actual !== expected) {
+        throw new Error(`write verification failed for ${container}:${path}: expected ${expected} bytes, got ${Number.isFinite(actual) ? actual : decodeUtf8(verify.stdout).trim() || "unknown"}`);
+      }
+      return textResult(`${append ? "Appended to" : "Wrote"} ${container}:${path} (${expected} bytes)`);
     }),
 
     docker_mkdir: async ({ container, path }) => safe(async () => {
@@ -131,7 +144,12 @@ export function createHandlers(transport, {
     }),
 
     docker_apply_patch: async ({ container, patch, strip = 0, dry_run = false }) => safe(async () => {
-      const result = await transport.exec(container, remoteShellCommand(remoteApplyPatchCommand({ strip, dry_run })), { stdin: patch, maxBytes: MAX_TEXT_BYTES });
+      const prepared = preparePatchForRemote(patch);
+      const result = await transport.exec(
+        container,
+        remoteShellCommand(remoteApplyPatchCommand({ strip, dry_run, cdRoot: prepared.cdRoot })),
+        { stdin: prepared.patch, maxBytes: MAX_TEXT_BYTES },
+      );
       return textResult(decodeUtf8(result.stdout) || (dry_run ? "Patch dry-run succeeded." : "Patch applied successfully."));
     }),
 
@@ -158,7 +176,7 @@ export function createHandlers(transport, {
       }
       const remoteCommand = remoteShellCommand(inner);
       if (background) {
-        const child = transport.spawnBackground(container, remoteCommand);
+        const child = await transport.spawnBackground(container, remoteCommand);
         const job = await jobManager.start({ target: container, command, cwd, env, child });
         return textResult(`job_id=${job.id}\nstatus=started\ncommand=${command}`);
       }
@@ -202,7 +220,7 @@ export function createHandlers(transport, {
       if (interactiveSessions.size >= INTERACTIVE_MAX_SESSIONS) {
         throw new Error(`too many open interactive sessions (max ${INTERACTIVE_MAX_SESSIONS}); close one with docker_interactive_close first`);
       }
-      const child = transport.spawnInteractive(container, remoteShellCommand(command));
+      const child = await transport.spawnInteractive(container, remoteShellCommand(command));
       const id = randomId();
       const session = {
         id, child, container, command,

@@ -77,6 +77,7 @@ export function createMockTransport({
     LOGNAME: "mock",
     PATH: `${binDir}${pathSep}${process.env.PATH || "/usr/bin:/bin"}`,
     BASH_ENV: bashEnvPath.replace(/\\/g, "/"),
+    MCP_DOCKER_ROOT: root,
   };
 
   async function runRemote(remoteCommand, { stdin, maxBytes = MAX_TEXT_BYTES, timeoutMs = 30000 } = {}) {
@@ -147,7 +148,7 @@ export function createMockTransport({
     return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0, signal: null };
   }
 
-  function spawnInteractive(target, remoteCommand) {
+  async function spawnInteractive(target, remoteCommand) {
     parseTarget(target);
     return spawn("bash", ["--noprofile", "--norc", "-c", remoteCommand], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -157,7 +158,7 @@ export function createMockTransport({
     });
   }
 
-  function spawnBackground(target, remoteCommand) {
+  async function spawnBackground(target, remoteCommand) {
     parseTarget(target);
     return spawn("bash", ["--noprofile", "--norc", "-c", remoteCommand], {
       stdio: ["ignore", "pipe", "pipe"],

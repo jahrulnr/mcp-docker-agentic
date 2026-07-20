@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { dockerExecArgs, spawnCaptured } from "../src/transport/real.js";
+import { dockerBackgroundArgs, dockerExecArgs, dockerInteractiveArgs, spawnCaptured } from "../src/transport/real.js";
 
 describe("spawnCaptured", () => {
   it("captures small stdout and stderr", async () => {
@@ -122,5 +122,20 @@ describe("dockerExecArgs", () => {
     const without = dockerExecArgs("c1", "/bin/sh", "true");
     assert.ok(withFlag.includes("-i"));
     assert.equal(without.includes("-i"), false);
+  });
+});
+
+describe("dockerInteractiveArgs / dockerBackgroundArgs", () => {
+  it("interactive uses -i and never -t", () => {
+    const args = dockerInteractiveArgs("c1", "/bin/bash", "read x");
+    assert.deepEqual(args, ["exec", "-i", "c1", "/bin/bash", "-c", "read x"]);
+    assert.equal(args.includes("-t"), false);
+    assert.equal(args.includes("-it"), false);
+  });
+
+  it("background keeps stdout attached and never uses -d", () => {
+    const args = dockerBackgroundArgs("c1", "/bin/sh", "echo hi");
+    assert.deepEqual(args, ["exec", "c1", "/bin/sh", "-c", "echo hi"]);
+    assert.equal(args.includes("-d"), false);
   });
 });
