@@ -85,15 +85,17 @@ async function main() {
   let stderr = "";
   transport.stderr?.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
 
+    const MCP_TIMEOUT_MS = 120000;
+
   const client = new Client({ name: "mcp-docker-agentic-smoke", version: "0.0.0" });
   try {
-    await client.connect(transport);
+    await client.connect(transport, { timeout: MCP_TIMEOUT_MS });
 
     const init = client.getServerVersion();
     assert.equal(init?.name, "mcp-docker-agentic");
     assert.ok(init?.version, "server version missing");
 
-    const { tools } = await client.listTools();
+    const { tools } = await client.listTools(undefined, { timeout: MCP_TIMEOUT_MS });
     const names = new Set(tools.map((t) => t.name));
     for (const required of [
       "docker_ping",
@@ -105,14 +107,14 @@ async function main() {
       assert.ok(names.has(required), `missing tool ${required}`);
     }
 
-    const ping = await client.callTool({ name: "docker_ping", arguments: { container: TARGET } });
+    const ping = await client.callTool({ name: "docker_ping", arguments: { container: TARGET } }, undefined, { timeout: MCP_TIMEOUT_MS });
     assert.equal(ping.isError, undefined);
     assert.match(textOf(ping), /1000\nmock-container/);
 
     const exec = await client.callTool({
       name: "docker_exec",
       arguments: { container: TARGET, command: "printf 'MCP_SMOKE_OK\\n'", timeout_ms: 5000 },
-    });
+    }, undefined, { timeout: MCP_TIMEOUT_MS });
     assert.equal(exec.isError, undefined);
     assert.match(textOf(exec), /exit_code=0/);
     assert.match(textOf(exec), /MCP_SMOKE_OK/);
@@ -126,13 +128,13 @@ async function main() {
         append: false,
         create_dirs: true,
       },
-    });
+    }, undefined, { timeout: MCP_TIMEOUT_MS });
     assert.equal(write.isError, undefined);
 
     const read = await client.callTool({
       name: "docker_read_file",
       arguments: { container: TARGET, path: "smoke/hello.txt" },
-    });
+    }, undefined, { timeout: MCP_TIMEOUT_MS });
     assert.equal(read.isError, undefined);
     assert.equal(textOf(read), "hello-mcp\n");
 
