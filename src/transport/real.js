@@ -55,13 +55,16 @@ export function spawnCaptured(command, args, {
 
 /**
  * Build the docker exec argument list for a non-interactive command.
+ * Pass `stdin: true` to include `-i` so Docker attaches the local stdin pipe
+ * to the remote process (required for write_file / apply_patch / exec stdin).
  * @param {string} container
  * @param {string} shell
  * @param {string} remoteCommand
- * @param {{ env?: Record<string,string>, workdir?: string, user?: string }} [execOpts]
+ * @param {{ env?: Record<string,string>, workdir?: string, user?: string, stdin?: boolean }} [execOpts]
  */
 export function dockerExecArgs(container, shell, remoteCommand, execOpts = {}) {
   const args = ["exec"];
+  if (execOpts.stdin) args.push("-i");
   if (execOpts.workdir) args.push("-w", execOpts.workdir);
   if (execOpts.user) args.push("-u", execOpts.user);
   if (execOpts.env) {
@@ -113,7 +116,7 @@ export function createRealTransport({ dockerBinary = "docker" } = {}) {
   } = {}) {
     parseTarget(container);
     const shell = await resolveShell(container);
-    const args = dockerExecArgs(container, shell, remoteCommand);
+    const args = dockerExecArgs(container, shell, remoteCommand, { stdin: stdin !== undefined });
     const result = await spawnCaptured(dockerBinary, args, { stdin, maxBytes, timeoutMs });
     const successCodes = new Set([0, ...okCodes]);
     if (!allowNonZero && !successCodes.has(result.code)) {

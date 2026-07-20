@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  MAX_TEXT_BYTES,
+  appendToSessionBuffer,
   combineStreams,
   decodeUtf8,
+  drainSessionOutput,
+  errorResult,
   formatBytes,
   formatFailure,
   parseTarget,
@@ -11,7 +15,10 @@ import {
   remoteListDirCommand,
   remoteReadFileCommand,
   remoteShellCommand,
+  safe,
+  settleSession,
   shellQuote,
+  textResult,
 } from "../src/util.js";
 
 describe("parseTarget", () => {
@@ -33,6 +40,18 @@ describe("parseTarget", () => {
 
   it("rejects leading dash", () => {
     assert.throws(() => parseTarget("--rm"), /invalid/);
+  });
+
+  it("rejects leading slash", () => {
+    assert.throws(() => parseTarget("/evil"), /invalid/);
+  });
+
+  it("trims surrounding whitespace", () => {
+    assert.equal(parseTarget("  my-app  "), "my-app");
+  });
+
+  it("accepts dotted and underscored names", () => {
+    assert.equal(parseTarget("my_app.prod-1"), "my_app.prod-1");
   });
 });
 
@@ -136,17 +155,96 @@ describe("helpers", () => {
     assert.match(msg, /out/);
   });
 
+  it("formats failure when only stdout is present", () => {
+    const msg = formatFailure({
+      code: 127,
+      stdout: Buffer.from("0\n"),
+      stderr: Buffer.from(""),
+    });
+    assert.match(msg, /code 127/);
+    assert.match(msg, /^docker exited with code 127\n0$/);
+  });
+
   it("combineStreams puts stderr in a labeled block", () => {
     assert.equal(combineStreams("hi\n", ""), "hi\n");
     assert.equal(combineStreams("hi", "boom"), "hi\n[stderr]\nboom\n");
+    assert.equal(combineStreams("", "only-err"), "only-err\n");
   });
 
   it("formatBytes", () => {
     assert.equal(formatBytes(100), "100 B");
     assert.equal(formatBytes(2048), "2.0 KiB");
+    assert.equal(formatBytes(3 * 1024 * 1024), "3.0 MiB");
   });
 
   it("decodeUtf8", () => {
     assert.equal(decodeUtf8(Buffer.from("hello")), "hello");
+  });
+
+  it("textResult and errorResult shape MCP content", () => {
+    assert.deepEqual(textResult("ok"), { content: [{ type: "text", text: "ok" }] });
+    assert.equal(textResult("bad", { isError: true }).isError, true);
+    assert.equal(errorResult(new Error("boom")).isError, true);
+    assert.equal(errorResult(new Error("boom")).content[0].text, "boom");
+    assert.equal(errorResult("plain").content[0].text, "plain");
+  });
+
+  it("safe converts thrown errors into errorResult", async () => {
+    const ok = await safe(async () => textResult("fine"));
+    assert.equal(ok.isError, undefined);
+    assert.equal(ok.content[0].text, "fine");
+
+    const bad = await safe(async () => {
+      throw new Error("nope");
+    });
+    assert.equal(bad.isError, true);
+    assert.equal(bad.content[0].text, "nope");
+  });
+
+  it("exposes a 5 MiB text byte budget", () => {
+    assert.equal(MAX_TEXT_BYTES, 5 * 1024 * 1024);
+  });
+});
+
+describe("session buffer helpers", () => {
+  it("appendToSessionBuffer truncates from the head when over budget", () => {
+    const session = { chunks: [], bufferedBytes: 0, truncated: false };
+    appendToSessionBuffer(session, Buffer.from("AAAA"), 6);
+    appendToSessionBuffer(session, Buffer.from("BB"), 6);
+    appendToSessionBuffer(session, Buffer.from("CCCC"), 6);
+    assert.equal(session.truncated, true);
+    assert.ok(session.bufferedBytes <= 6);
+    const text = Buffer.concat(session.chunks).toString("utf8");
+    assert.equal(text.includes("AAAA"), false);
+    assert.match(text, /C/);
+  });
+
+  it("drainSessionOutput clears chunks and returns truncation flag", () => {
+    const session = {
+      chunks: [Buffer.from("one"), Buffer.from("two")],
+      bufferedBytes: 6,
+      truncated: true,
+    };
+    const drained = drainSessionOutput(session);
+    assert.equal(drained.text, "onetwo");
+    assert.equal(drained.truncated, true);
+    assert.equal(session.chunks.length, 0);
+    assert.equal(session.bufferedBytes, 0);
+    assert.equal(session.truncated, false);
+  });
+
+  it("settleSession resolves when quiet or exited", async () => {
+    const quiet = { exited: false, lastDataAt: Date.now() - 1000 };
+    await settleSession(quiet, { quietMs: 50, maxWaitMs: 1000 });
+
+    const exited = { exited: true, lastDataAt: Date.now() };
+    await settleSession(exited, { quietMs: 5000, maxWaitMs: 5000 });
+  });
+});
+
+describe("remoteShellCommand quoting", () => {
+  it("preserves quoted payload inside the outer shellQuote", () => {
+    const cmd = remoteShellCommand("echo 'hello world'");
+    assert.match(cmd, /bash --noprofile --norc -c -- 'echo '\\''hello world'\\'''/);
   });
 });

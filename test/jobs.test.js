@@ -76,4 +76,29 @@ describe("createJobManager", () => {
     assert.equal(result.exitCode, 0);
     assert.match(result.stdout, /job output/);
   });
+
+  it("getResult returns nullish for unknown ids", async () => {
+    const mgr = createJobManager({ jobDir });
+    const result = await mgr.getResult("missing-job", { wait: false });
+    assert.equal(result == null, true);
+  });
+
+  it("kill reports not found for unknown ids", async () => {
+    const mgr = createJobManager({ jobDir });
+    const result = await mgr.kill("missing-job", "SIGTERM", false);
+    assert.equal(result.found, false);
+  });
+
+  it("getResult timedOut stays running when wait expires", async () => {
+    const mgr = createJobManager({ jobDir });
+    const child = spawn("bash", ["--noprofile", "--norc", "-c", "sleep 5"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+    const { id } = await mgr.start({ target: "c1", command: "sleep 5", child });
+    const result = await mgr.getResult(id, { wait: true, timeoutMs: 80 });
+    assert.equal(result.timedOut, true);
+    assert.equal(result.status, "running");
+    await mgr.kill(id, "SIGKILL", true);
+  });
 });

@@ -78,6 +78,12 @@ describe("createMockTransport", () => {
     }
   });
 
+  it("exec forwards stdin into the remote command", async () => {
+    const result = await transport.exec(TARGET, remoteShellCommand("cat"), { stdin: "from-stdin\n" });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout.toString(), "from-stdin\n");
+  });
+
   it("close succeeds", async () => {
     const result = await transport.close(TARGET);
     assert.equal(result.code, 0);
@@ -375,5 +381,223 @@ describe("handlers via mock transport (Docker contract)", () => {
 
     const cleaned = await api.handlers.docker_exec_kill({ job_id: jobId, cleanup: true });
     assert.match(textOf(cleaned), /cleaned=true/);
+  });
+
+  it("docker_write_file rejects content over MAX_TEXT_BYTES", async () => {
+    const { MAX_TEXT_BYTES } = await import("../src/util.js");
+    const content = "x".repeat(MAX_TEXT_BYTES + 1);
+    const result = await api.handlers.docker_write_file({
+      container: TARGET,
+      path: "app/too-big.txt",
+      content,
+      append: false,
+      create_dirs: true,
+    });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /content exceeds/);
+  });
+
+  it("docker_write_file fails when create_dirs=false and parent is missing", async () => {
+    const result = await api.handlers.docker_write_file({
+      container: TARGET,
+      path: "missing-parent/file.txt",
+      content: "nope\n",
+      append: false,
+      create_dirs: false,
+    });
+    assert.equal(result.isError, true);
+  });
+
+  it("docker_write_file via stdin persists exact bytes (mock contract)", async () => {
+    const path = "app/stdin-bytes.txt";
+    const content = "exact\nbytes\nwith 'quotes' and $vars\n";
+    const write = await api.handlers.docker_write_file({
+      container: TARGET,
+      path,
+      content,
+      append: false,
+      create_dirs: true,
+    });
+    assert.equal(write.isError, undefined);
+    assert.equal(readFileSync(transport.resolvePath(path), "utf8"), content);
+  });
+
+  it("docker_grep supports ignore_case, glob, fixed_strings, and invert", async () => {
+    await api.handlers.docker_write_file({
+      container: TARGET,
+      path: "grepme/note.js",
+      content: "Hello World\nregex.*meta\nkeep\n",
+      append: false,
+      create_dirs: true,
+    });
+    await api.handlers.docker_write_file({
+      container: TARGET,
+      path: "grepme/note.txt",
+      content: "hello from txt\n",
+      append: false,
+      create_dirs: true,
+    });
+
+    const ignoreCase = await api.handlers.docker_grep({
+      container: TARGET,
+      pattern: "hello",
+      path: "grepme",
+      ignore_case: true,
+    });
+    assert.match(textOf(ignoreCase), /Hello World|hello from txt/);
+
+    const globbed = await api.handlers.docker_grep({
+      container: TARGET,
+      pattern: "Hello",
+      path: "grepme",
+      glob: "*.js",
+    });
+    assert.match(textOf(globbed), /note\.js/);
+    assert.doesNotMatch(textOf(globbed), /note\.txt/);
+
+    const fixed = await api.handlers.docker_grep({
+      container: TARGET,
+      pattern: "regex.*meta",
+      path: "grepme",
+      fixed_strings: true,
+    });
+    assert.match(textOf(fixed), /regex\.\*meta/);
+
+    const inverted = await api.handlers.docker_grep({
+      container: TARGET,
+      pattern: "Hello",
+      path: "grepme/note.js",
+      invert: true,
+    });
+    assert.match(textOf(inverted), /keep|regex/);
+    assert.doesNotMatch(textOf(inverted), /Hello World/);
+  });
+
+  it("docker_apply_patch applies a unified diff", async () => {
+    await api.handlers.docker_write_file({
+      container: TARGET,
+      path: "patchme/hello.txt",
+      content: "hello\n",
+      append: false,
+      create_dirs: true,
+    });
+
+    const patch = [
+      "--- patchme/hello.txt",
+      "+++ patchme/hello.txt",
+      "@@ -1 +1 @@",
+      "-hello",
+      "+hello patched",
+      "",
+    ].join("\n");
+
+    const applied = await api.handlers.docker_apply_patch({
+      container: TARGET,
+      patch,
+      strip: 0,
+      dry_run: false,
+    });
+    assert.equal(applied.isError, undefined);
+    assert.equal(readFileSync(transport.resolvePath("patchme/hello.txt"), "utf8"), "hello patched\n");
+  });
+
+  it("docker_apply_patch dry_run does not mutate the file", async () => {
+    await api.handlers.docker_write_file({
+      container: TARGET,
+      path: "patchme/dry.txt",
+      content: "before\n",
+      append: false,
+      create_dirs: true,
+    });
+    const patch = [
+      "--- patchme/dry.txt",
+      "+++ patchme/dry.txt",
+      "@@ -1 +1 @@",
+      "-before",
+      "+after",
+      "",
+    ].join("\n");
+    const dry = await api.handlers.docker_apply_patch({
+      container: TARGET,
+      patch,
+      strip: 0,
+      dry_run: true,
+    });
+    assert.equal(dry.isError, undefined);
+    assert.equal(readFileSync(transport.resolvePath("patchme/dry.txt"), "utf8"), "before\n");
+  });
+
+  it("docker_delete recursive removes a directory tree", async () => {
+    await api.handlers.docker_write_file({
+      container: TARGET,
+      path: "tree/a/b.txt",
+      content: "x",
+      append: false,
+      create_dirs: true,
+    });
+    const del = await api.handlers.docker_delete({ container: TARGET, path: "tree", recursive: true });
+    assert.match(textOf(del), /recursively/);
+    const { existsSync } = await import("node:fs");
+    assert.equal(existsSync(transport.resolvePath("tree")), false);
+  });
+
+  it("docker_list_dir errors for a missing path", async () => {
+    const result = await api.handlers.docker_list_dir({ container: TARGET, path: "no-such-dir" });
+    assert.equal(result.isError, true);
+  });
+
+  it("docker_read_file errors for a missing file", async () => {
+    const result = await api.handlers.docker_read_file({ container: TARGET, path: "no-such-file.txt" });
+    assert.equal(result.isError, true);
+  });
+
+  it("docker_exec rejects invalid environment variable names", async () => {
+    const result = await api.handlers.docker_exec({
+      container: TARGET,
+      command: "true",
+      env: { "BAD-NAME": "x" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /invalid environment variable name/);
+  });
+
+  it("docker_cp_to recursive copies a directory", async () => {
+    const srcDir = join(localDir, "dir-up");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "nested.txt"), "nested\n");
+    const up = await api.handlers.docker_cp_to({
+      container: TARGET,
+      local_path: srcDir,
+      remote_path: "cp-dir",
+      recursive: true,
+      timeout_ms: 5000,
+    });
+    assert.match(textOf(up), /recursive/);
+    assert.equal(readFileSync(transport.resolvePath("cp-dir/nested.txt"), "utf8"), "nested\n");
+  });
+
+  it("docker_exec_result reports missing job ids", async () => {
+    const result = await api.handlers.docker_exec_result({ job_id: "no-such-job", wait: false });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /no background job/);
+  });
+
+  it("docker_interactive_input errors for unknown session", async () => {
+    const result = await api.handlers.docker_interactive_input({ session_id: "missing", input: "x" });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /no active interactive session/);
+  });
+
+  it("docker_interactive_exec that exits immediately has no lingering session", async () => {
+    const started = await api.handlers.docker_interactive_exec({
+      container: TARGET,
+      command: "printf 'done\\n'",
+      quiet_ms: 100,
+    });
+    assert.equal(started.isError, undefined);
+    assert.match(textOf(started), /exited \(code 0\)/);
+    assert.doesNotMatch(textOf(started), /session_id=/);
+    const list = await api.handlers.docker_interactive_list({});
+    assert.match(textOf(list), /no active/);
   });
 });
