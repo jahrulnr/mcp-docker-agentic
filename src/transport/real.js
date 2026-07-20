@@ -3,6 +3,15 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { MAX_TEXT_BYTES, decodeUtf8, formatFailure, parseTarget } from "../util.js";
 
+const SHELL_CANDIDATES = [
+  "/bin/bash",
+  "/usr/bin/bash",
+  "/bin/ash",
+  "/usr/bin/ash",
+  "/bin/sh",
+  "/usr/bin/sh",
+];
+
 /**
  * @param {string} command
  * @param {string[]} args
@@ -47,10 +56,11 @@ export function spawnCaptured(command, args, {
 /**
  * Build the docker exec argument list for a non-interactive command.
  * @param {string} container
+ * @param {string} shell
  * @param {string} remoteCommand
  * @param {{ env?: Record<string,string>, workdir?: string, user?: string }} [execOpts]
  */
-export function dockerExecArgs(container, remoteCommand, execOpts = {}) {
+export function dockerExecArgs(container, shell, remoteCommand, execOpts = {}) {
   const args = ["exec"];
   if (execOpts.workdir) args.push("-w", execOpts.workdir);
   if (execOpts.user) args.push("-u", execOpts.user);
@@ -59,7 +69,7 @@ export function dockerExecArgs(container, remoteCommand, execOpts = {}) {
       args.push("-e", `${k}=${v}`);
     }
   }
-  args.push(container, "sh", "-c", remoteCommand);
+  args.push(container, shell, "-c", remoteCommand);
   return args;
 }
 
@@ -69,6 +79,31 @@ export function dockerExecArgs(container, remoteCommand, execOpts = {}) {
  * @returns {import('./contract.js').DockerTransport & { getMuxEnabled: () => boolean }}
  */
 export function createRealTransport({ dockerBinary = "docker" } = {}) {
+  const shellCache = new Map();
+
+  async function detectShell(container) {
+    for (const shell of SHELL_CANDIDATES) {
+      try {
+        const result = await spawnCaptured(dockerBinary, ["exec", container, shell, "-c", "exit 0"], { timeoutMs: 5000, maxBytes: 1024 });
+        if (result.code === 0) return shell;
+      } catch {
+        // try next shell
+      }
+    }
+    return "/bin/sh";
+  }
+
+  async function resolveShell(container) {
+    if (!shellCache.has(container)) {
+      shellCache.set(container, await detectShell(container));
+    }
+    return shellCache.get(container);
+  }
+
+  function getShellSync(container) {
+    return shellCache.get(container) || "/bin/sh";
+  }
+
   async function exec(container, remoteCommand, {
     stdin,
     maxBytes = MAX_TEXT_BYTES,
@@ -77,7 +112,8 @@ export function createRealTransport({ dockerBinary = "docker" } = {}) {
     okCodes = [],
   } = {}) {
     parseTarget(container);
-    const args = dockerExecArgs(container, remoteCommand);
+    const shell = await resolveShell(container);
+    const args = dockerExecArgs(container, shell, remoteCommand);
     const result = await spawnCaptured(dockerBinary, args, { stdin, maxBytes, timeoutMs });
     const successCodes = new Set([0, ...okCodes]);
     if (!allowNonZero && !successCodes.has(result.code)) {
@@ -128,12 +164,14 @@ export function createRealTransport({ dockerBinary = "docker" } = {}) {
 
   function spawnInteractive(container, remoteCommand) {
     parseTarget(container);
-    return spawn(dockerBinary, ["exec", "-it", container, "sh", "-c", remoteCommand], { stdio: ["pipe", "pipe", "pipe"] });
+    const shell = getShellSync(container);
+    return spawn(dockerBinary, ["exec", "-it", container, shell, "-c", remoteCommand], { stdio: ["pipe", "pipe", "pipe"] });
   }
 
   function spawnBackground(container, remoteCommand) {
     parseTarget(container);
-    return spawn(dockerBinary, ["exec", "-d", container, "sh", "-c", remoteCommand], { stdio: "ignore", detached: true });
+    const shell = getShellSync(container);
+    return spawn(dockerBinary, ["exec", "-d", container, shell, "-c", remoteCommand], { stdio: "ignore", detached: true });
   }
 
   return {

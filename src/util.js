@@ -89,10 +89,11 @@ export function remoteListDirCommand(path) {
 export function remoteReadFileCommand(path, offset = 1, limit = 0) {
   const p = shellQuote(path);
   const start = Math.max(1, Math.floor(offset || 1));
+  const pipefail = 'if [ -n "$BASH_VERSION" ]; then set -o pipefail; fi';
   if (start === 1 && limit === 0) return `cat -- ${p}`;
-  if (start === 1) return `set -o pipefail; cat -- ${p} | head -n ${limit}`;
-  if (limit === 0) return `cat -- ${p} | tail -n +${start}`;
-  return `set -o pipefail; cat -- ${p} | tail -n +${start} | head -n ${limit}`;
+  if (start === 1) return `${pipefail}; cat -- ${p} | head -n ${limit}`;
+  if (limit === 0) return `${pipefail}; cat -- ${p} | tail -n +${start}`;
+  return `${pipefail}; cat -- ${p} | tail -n +${start} | head -n ${limit}`;
 }
 
 /**
