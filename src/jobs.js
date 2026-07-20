@@ -146,7 +146,7 @@ export function createJobManager({
       meta.endTime = now();
       await stdoutWriter.end();
       await stderrWriter.end();
-      writeMetaSync(id, meta);
+      try { writeMetaSync(id, meta); } catch { /* directory may have been cleaned up */ }
       jobs.delete(id);
     });
     child.on("error", async (error) => {
@@ -155,7 +155,7 @@ export function createJobManager({
       meta.endTime = now();
       await stdoutWriter.end();
       await stderrWriter.end();
-      writeMetaSync(id, meta);
+      try { writeMetaSync(id, meta); } catch { /* directory may have been cleaned up */ }
       jobs.delete(id);
     });
 
@@ -281,6 +281,14 @@ export function createJobManager({
     }
 
     if (cleanup) {
+      // Wait a moment for the child to exit and the writers to flush before
+      // deleting the log directory. On Windows the process may need extra ms.
+      const deadline = now() + 2000;
+      while (job.child && isChildRunning(job.child) && now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await job.stdoutWriter?.end();
+      await job.stderrWriter?.end();
       try {
         rmSync(dir(id), { recursive: true, force: true });
       } catch {
